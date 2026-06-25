@@ -23,20 +23,26 @@ function safeEqual(a = "", b = "") {
   return crypto.timingSafeEqual(ab, bb);
 }
 
-// POST /api/auth/login  { username, password } -> { token }
+// POST /api/auth/login  { username, password } -> { token, username, role }
 router.post("/login", loginLimiter, (req, res) => {
   const { username = "", password = "" } = req.body || {};
-  const okUser = safeEqual(username, process.env.ADMIN_USERNAME || "");
-  const okPass = safeEqual(password, process.env.ADMIN_PASSWORD || "");
 
-  if (!okUser || !okPass) {
+  const isAdmin =
+    safeEqual(username, process.env.ADMIN_USERNAME || "") &&
+    safeEqual(password, process.env.ADMIN_PASSWORD || "");
+  // Read-only viewer account (optional — only active if VIEWER_* env vars set).
+  const isViewer =
+    !!process.env.VIEWER_USERNAME &&
+    safeEqual(username, process.env.VIEWER_USERNAME || "") &&
+    safeEqual(password, process.env.VIEWER_PASSWORD || "");
+
+  if (!isAdmin && !isViewer) {
     return res.status(401).json({ error: "ناوی بەکارهێنەر یان وشەی نهێنی هەڵەیە." });
   }
 
-  const token = jwt.sign({ sub: username, role: "admin" }, process.env.JWT_SECRET, {
-    expiresIn: "7d",
-  });
-  res.json({ token, username });
+  const role = isAdmin ? "admin" : "viewer";
+  const token = jwt.sign({ sub: username, role }, process.env.JWT_SECRET, { expiresIn: "7d" });
+  res.json({ token, username, role });
 });
 
 // GET /api/auth/me  -> verify the current token is still valid

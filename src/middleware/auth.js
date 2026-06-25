@@ -16,3 +16,11 @@ export function authRequired(req, res, next) {
     res.status(401).json({ error: "Session expired. Please log in again." });
   }
 }
+
+/** Blocks non-admins (e.g. the read-only "viewer" role). Use after authRequired. */
+export function adminOnly(req, res, next) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ error: "ئەم کردارە تەنها بۆ بەڕێوەبەرە." });
+  }
+  next();
+}

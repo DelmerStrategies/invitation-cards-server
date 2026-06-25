@@ -1,5 +1,6 @@
 import { Router } from "express";
 import Event from "../models/Event.js";
+import { adminOnly } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -18,8 +19,8 @@ router.get("/", async (req, res) => {
   res.json(event);
 });
 
-// PUT /api/event  -> update title/date/venueAddress
-router.put("/", async (req, res) => {
+// PUT /api/event  -> update title/date/venueAddress (admin only)
+router.put("/", adminOnly, async (req, res) => {
   const event = await getActiveEvent();
   const { title, date, venueAddress, orgText, showLogo } = req.body;
 

@@ -1,10 +1,13 @@
 import { Router } from "express";
 import archiver from "archiver";
 import QRCode from "qrcode";
+import { randomUUID } from "node:crypto";
+import { Writable } from "node:stream";
 import Guest from "../models/Guest.js";
 import { getActiveEvent } from "./events.js";
 import { generateCardPng, generateBulkPdf, generatePerGuestPdfs } from "../services/cardGenerator.js";
 import { rsvpUrl } from "../utils/rsvpUrl.js";
+import { adminOnly } from "../middleware/auth.js";
 
 // Make a filesystem-safe file name, keeping Kurdish/Arabic letters.
 function safeName(s = "") {
@@ -12,20 +15,15 @@ function safeName(s = "") {
 }
 
 const router = Router();
-
 const buildQrUrl = (guest) => rsvpUrl(guest.token);
 
-// GET /api/cards/qr/:id  -> just the QR code PNG for one guest (shown clickable
-// in the dashboard so you can scan it from a phone or click to open).
+// GET /api/cards/qr/:id  -> QR PNG for one guest (clickable in the dashboard).
 router.get("/qr/:id", async (req, res) => {
   const guest = await Guest.findById(req.params.id);
   if (!guest) return res.status(404).json({ error: "Guest not found." });
   try {
     const png = await QRCode.toBuffer(buildQrUrl(guest), {
-      type: "png",
-      width: 300,
-      margin: 1,
-      errorCorrectionLevel: "M",
+      type: "png", width: 300, margin: 1, errorCorrectionLevel: "M",
     });
     res.set("Content-Type", "image/png");
     res.set("Cache-Control", "no-store");
@@ -35,12 +33,11 @@ router.get("/qr/:id", async (req, res) => {
   }
 });
 
-// GET /api/cards/preview/:id  -> single card PNG (used for dashboard preview)
-router.get("/preview/:id", async (req, res) => {
+// GET /api/cards/preview/:id  -> single card PNG (dashboard preview)
+router.get("/preview/:id", adminOnly, async (req, res) => {
   const event = await getActiveEvent();
   const guest = await Guest.findById(req.params.id);
   if (!guest) return res.status(404).json({ error: "Guest not found." });
-
   try {
     const png = await generateCardPng(guest, buildQrUrl(guest), event);
     res.set("Content-Type", "image/png");
@@ -50,54 +47,102 @@ router.get("/preview/:id", async (req, res) => {
   }
 });
 
-// GET /api/cards/pdf  -> bulk PDF of every guest's card
-router.get("/pdf", async (req, res) => {
+// Build a ZIP (one PDF per guest) into a single Buffer.
+function zipToBuffer(items) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const sink = new Writable({ write(c, e, cb) { chunks.push(c); cb(); } });
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", reject);
+    sink.on("finish", () => resolve(Buffer.concat(chunks)));
+    archive.pipe(sink);
+    items.forEach(({ guest, pdf }, i) => {
+      const prefix = String(i + 1).padStart(3, "0");
+      archive.append(pdf, { name: `${prefix} - ${safeName(guest.name) || "guest"}.pdf` });
+    });
+    archive.finalize();
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Background export jobs (so big exports show progress instead of a frozen
+// multi-minute request). In-memory store — fine for a single-admin tool.
+// ──────────────────────────────────────────────────────────────────────────
+const jobs = new Map();
+const JOB_TTL = 15 * 60 * 1000; // keep finished jobs 15 min
+
+// Periodically drop old jobs to free memory.
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, j] of jobs) if (now - j.createdAt > JOB_TTL) jobs.delete(id);
+}, 60 * 1000).unref();
+
+async function startExport(type) {
   const event = await getActiveEvent();
   const guests = await Guest.find({ event: event._id }).sort({ createdAt: 1 });
-  if (!guests.length) return res.status(400).json({ error: "No guests to generate." });
+  if (!guests.length) return { error: "هیچ میوانێک نییە بۆ دروستکردن." };
 
-  try {
-    const pdf = await generateBulkPdf(guests, buildQrUrl, event);
-    // Use octet-stream (not application/pdf) so browser PDF-viewer extensions
-    // don't hijack the response; we force the .pdf filename for the download.
-    res.set("Content-Type", "application/octet-stream");
-    res.set("Content-Disposition", 'attachment; filename="invitation-cards.pdf"');
-    res.send(pdf);
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
+  const id = randomUUID();
+  const job = {
+    id, type, status: "running", total: guests.length, done: 0,
+    buffer: null, filename: null, error: null, createdAt: Date.now(),
+  };
+  jobs.set(id, job);
+
+  const onProgress = (done) => { job.done = done; };
+  const run =
+    type === "pdf"
+      ? generateBulkPdf(guests, buildQrUrl, event, onProgress).then((buf) => ({
+          buffer: buf, filename: "invitation-cards.pdf",
+        }))
+      : generatePerGuestPdfs(guests, buildQrUrl, event, onProgress)
+          .then((items) => zipToBuffer(items))
+          .then((buf) => ({ buffer: buf, filename: "invitation-cards.zip" }));
+
+  run
+    .then(({ buffer, filename }) => {
+      job.buffer = buffer;
+      job.filename = filename;
+      job.done = job.total;
+      job.status = "ready";
+    })
+    .catch((err) => {
+      console.error(`[export ${type}] failed:`, err);
+      job.status = "error";
+      job.error = err.message;
+    });
+
+  return { jobId: id, total: guests.length };
+}
+
+// POST /api/cards/pdf/start  | /api/cards/zip/start  -> { jobId, total }
+router.post("/pdf/start", adminOnly, async (req, res) => {
+  const r = await startExport("pdf");
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+});
+router.post("/zip/start", adminOnly, async (req, res) => {
+  const r = await startExport("zip");
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
 });
 
-// GET /api/cards/zip  -> a ZIP containing one separate PDF per guest
-router.get("/zip", async (req, res) => {
-  const event = await getActiveEvent();
-  const guests = await Guest.find({ event: event._id }).sort({ createdAt: 1 });
-  if (!guests.length) return res.status(400).json({ error: "هیچ میوانێک نییە بۆ دروستکردن." });
+// GET /api/cards/job/:id  -> progress
+router.get("/job/:id", adminOnly, (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Job not found (maybe expired)." });
+  res.json({ status: job.status, total: job.total, done: job.done, error: job.error });
+});
 
-  let items;
-  try {
-    items = await generatePerGuestPdfs(guests, buildQrUrl, event);
-  } catch (err) {
-    return res.status(400).json({ error: err.message });
-  }
-
-  res.set("Content-Type", "application/zip");
-  res.set("Content-Disposition", 'attachment; filename="invitation-cards.zip"');
-
-  const archive = archiver("zip", { zlib: { level: 9 } });
-  archive.on("error", (err) => {
-    console.error("[zip] error", err);
-    res.destroy(err);
-  });
-  archive.pipe(res);
-
-  items.forEach(({ guest, pdf }, i) => {
-    const prefix = String(i + 1).padStart(3, "0");
-    const name = safeName(guest.name) || "guest";
-    archive.append(pdf, { name: `${prefix} - ${name}.pdf` });
-  });
-
-  await archive.finalize();
+// GET /api/cards/job/:id/download  -> the finished file
+router.get("/job/:id/download", adminOnly, (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Job not found (maybe expired)." });
+  if (job.status === "error") return res.status(400).json({ error: job.error });
+  if (job.status !== "ready" || !job.buffer) return res.status(409).json({ error: "Not ready yet." });
+  res.set("Content-Type", "application/octet-stream");
+  res.set("Content-Disposition", `attachment; filename="${job.filename}"`);
+  res.send(job.buffer);
 });
 
 export default router;

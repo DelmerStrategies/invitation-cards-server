@@ -38,6 +38,15 @@ app.use(
 app.use(cors({ origin: origins }));
 app.use(express.json({ limit: "1mb" }));
 
+// Request log — so you can see every call hit the backend (incl. PDF downloads).
+app.use((req, res, next) => {
+  const t = Date.now();
+  res.on("finish", () =>
+    console.log(`[req] ${req.method} ${req.originalUrl} → ${res.statusCode} (${Date.now() - t}ms)`)
+  );
+  next();
+});
+
 // --- API ---
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
