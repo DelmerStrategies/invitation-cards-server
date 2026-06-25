@@ -85,8 +85,11 @@ app.use((err, req, res, next) => {
 
 connectDB(process.env.MONGODB_URI)
   .then(() => {
-    const server = app.listen(PORT, () =>
-      console.log(`[server] listening on http://localhost:${PORT}`)
+    // Bind to 0.0.0.0 (IPv4, all interfaces) so Azure App Service's container
+    // health ping can reach us. Node's default bind is IPv6 "::", which the
+    // platform's IPv4 ping may not reach → it restarts the container every 230s.
+    const server = app.listen(PORT, "0.0.0.0", () =>
+      console.log(`[server] listening on 0.0.0.0:${PORT}`)
     );
     // Pre-launch Chromium so the first PDF/ZIP download isn't slow.
     warmupBrowser();
