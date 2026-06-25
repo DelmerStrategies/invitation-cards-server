@@ -91,8 +91,12 @@ connectDB(process.env.MONGODB_URI)
     const server = app.listen(PORT, "0.0.0.0", () =>
       console.log(`[server] listening on 0.0.0.0:${PORT}`)
     );
-    // Pre-launch Chromium so the first PDF/ZIP download isn't slow.
-    warmupBrowser();
+    // NOTE: Chromium is intentionally NOT warmed up at startup. On a small
+    // (1-core Basic) App Service instance, launching Chromium here starves the
+    // event loop, so Azure's startup health probe never gets a response and the
+    // platform kills the container at the 230s timeout. The browser now launches
+    // lazily on the first PDF/ZIP request (getBrowser()), keeping startup instant.
+    void warmupBrowser; // intentionally not called at boot — see note above
 
     // Graceful shutdown: stop accepting requests, close the browser, exit.
     const shutdown = async (sig) => {
