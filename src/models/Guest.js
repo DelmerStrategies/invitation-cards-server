@@ -9,6 +9,10 @@ const guestSchema = new mongoose.Schema(
     address: { type: String, default: "", maxlength: 300 },
     seatNumber: { type: String, default: "", maxlength: 80 }, // "set number" / table / seat label
 
+    // VIP guests are listed separately and their cards have NO QR code / no
+    // clickable RSVP link. (Absent/false = a normal guest.)
+    isVip: { type: Boolean, default: false, index: true },
+
     // Unique, hard-to-guess token used in the QR link: /r/<token>
     token: { type: String, required: true, unique: true, index: true },
 

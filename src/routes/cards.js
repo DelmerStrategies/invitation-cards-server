@@ -77,11 +77,13 @@ setInterval(() => {
   for (const [id, j] of jobs) if (now - j.createdAt > JOB_TTL) jobs.delete(id);
 }, 60 * 1000).unref();
 
-async function startExport(type) {
+async function startExport(type, vip = false) {
   const event = await getActiveEvent();
-  const guests = await Guest.find({ event: event._id }).sort({ createdAt: 1 });
+  const filter = { event: event._id, isVip: vip ? true : { $ne: true } };
+  const guests = await Guest.find(filter).sort({ createdAt: 1 });
   if (!guests.length) return { error: "هیچ میوانێک نییە بۆ دروستکردن." };
 
+  const stem = vip ? "vip-cards" : "invitation-cards";
   const id = randomUUID();
   const job = {
     id, type, status: "running", total: guests.length, done: 0,
@@ -93,11 +95,11 @@ async function startExport(type) {
   const run =
     type === "pdf"
       ? generateBulkPdf(guests, buildQrUrl, event, onProgress).then((buf) => ({
-          buffer: buf, filename: "invitation-cards.pdf",
+          buffer: buf, filename: `${stem}.pdf`,
         }))
       : generatePerGuestPdfs(guests, buildQrUrl, event, onProgress)
           .then((items) => zipToBuffer(items))
-          .then((buf) => ({ buffer: buf, filename: "invitation-cards.zip" }));
+          .then((buf) => ({ buffer: buf, filename: `${stem}.zip` }));
 
   run
     .then(({ buffer, filename }) => {
@@ -117,12 +119,12 @@ async function startExport(type) {
 
 // POST /api/cards/pdf/start  | /api/cards/zip/start  -> { jobId, total }
 router.post("/pdf/start", adminOnly, async (req, res) => {
-  const r = await startExport("pdf");
+  const r = await startExport("pdf", req.query.vip === "true");
   if (r.error) return res.status(400).json(r);
   res.json(r);
 });
 router.post("/zip/start", adminOnly, async (req, res) => {
-  const r = await startExport("zip");
+  const r = await startExport("zip", req.query.vip === "true");
   if (r.error) return res.status(400).json(r);
   res.json(r);
 });

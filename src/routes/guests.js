@@ -22,8 +22,11 @@ router.get("/", async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const q = (req.query.q || "").trim();
+  // `vip=true` -> the VIP tab; otherwise normal guests (absent/false isVip).
+  const vip = req.query.vip === "true";
+  const vipMatch = vip ? true : { $ne: true };
 
-  const filter = { event: event._id };
+  const filter = { event: event._id, isVip: vipMatch };
   if (q) {
     const rx = new RegExp(escapeRegex(q), "i");
     filter.$or = [{ name: rx }, { seatNumber: rx }, { address: rx }];
@@ -33,7 +36,7 @@ router.get("/", async (req, res) => {
     Guest.countDocuments(filter),
     Guest.find(filter).sort({ createdAt: 1 }).skip((page - 1) * limit).limit(limit).lean(),
     Guest.aggregate([
-      { $match: { event: event._id } },
+      { $match: { event: event._id, isVip: vipMatch } },
       {
         $group: {
           _id: "$rsvp.status",
@@ -66,7 +69,7 @@ router.get("/", async (req, res) => {
 // POST /api/guests  -> add one guest manually (admin only)
 router.post("/", adminOnly, async (req, res) => {
   const event = await getActiveEvent();
-  const { name, address = "", seatNumber = "" } = req.body;
+  const { name, address = "", seatNumber = "", isVip = false } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: "Name is required." });
 
   const guest = await Guest.create({
@@ -74,6 +77,7 @@ router.post("/", adminOnly, async (req, res) => {
     name: name.trim(),
     address,
     seatNumber,
+    isVip: !!isVip,
     token: makeToken(),
   });
   res.status(201).json(guest);
@@ -108,6 +112,7 @@ router.post("/import", adminOnly, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No CSV file uploaded (field 'file')." });
 
   const event = await getActiveEvent();
+  const isVip = req.query.vip === "true"; // import straight into the VIP list
 
   let records;
   try {
@@ -133,6 +138,7 @@ router.post("/import", adminOnly, upload.single("file"), async (req, res) => {
       name: name.trim(),
       address: row.address || row.place || "",
       seatNumber: row.seatnumber || row.seat || row.set || row["seat number"] || "",
+      isVip,
       token: makeToken(),
     });
   }

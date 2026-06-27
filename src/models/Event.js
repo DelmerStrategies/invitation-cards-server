@@ -21,6 +21,17 @@ const eventSchema = new mongoose.Schema(
     // Whether the logos are shown on the card.
     showLogo: { type: Boolean, default: true },
 
+    // Editable invitation body text (one paragraph per line). Default = the
+    // wording originally baked into the card template.
+    bodyText: {
+      type: String,
+      default:
+        "بەخۆشحاڵییەوە بەڕێزتان بانگهێشتکراوون بۆ مەڕاسیمی ئیمزاکردنی رێککەوتنی سیاسی نێوان یەکێتیی نیشتمانیی کوردستان و جوڵانەوەی نەوەی نوێ..\n" +
+        "ئامانجی ئەم رێککەوتنە گێڕانەوەی باڵانسی هێزەو رێکخستنەوەی رێڕەوی حوکمڕانییە و چەسپاندنی دادپەروەرییە و خزمەتکردنێکی باشتر و شایستەی هاوڵاتییانە..\n" +
+        "ئامادەبوونتان مایەی خۆشحاڵیمانە",
+      maxlength: 3000,
+    },
+
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }

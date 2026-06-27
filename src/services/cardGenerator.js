@@ -66,6 +66,14 @@ function fmtTime(value) {
   return `${ku(h12)}:${ku(pad(d.getMinutes()))} ${period}`;
 }
 
+// Body text -> an array of paragraphs (one per non-empty line).
+function bodyParas(event = {}) {
+  return String(event.bodyText || "")
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 // Per-event values that are constant across a whole batch.
 function eventConsts(event = {}) {
   return {
@@ -73,6 +81,8 @@ function eventConsts(event = {}) {
     date: fmtDate(event.date),
     time: fmtTime(event.date),
     hideLogo: event.showLogo === false,
+    // Empty array => leave the template's built-in body wording untouched.
+    body: bodyParas(event),
   };
 }
 
@@ -124,6 +134,18 @@ async function initPage(browser, html, consts) {
     const orgFoot = document.getElementById("orgfoot");
     if (orgFoot) orgFoot.textContent = ev.org;
     if (ev.hideLogo) document.querySelectorAll(".logo").forEach((l) => (l.style.display = "none"));
+    // Editable invitation body (one <p> per line). Empty => keep template text.
+    if (ev.body && ev.body.length) {
+      const bt = document.getElementById("bodytext");
+      if (bt) {
+        bt.textContent = "";
+        for (const para of ev.body) {
+          const p = document.createElement("p");
+          p.textContent = para;
+          bt.appendChild(p);
+        }
+      }
+    }
     const line = (id, label, value) => {
       const el = document.getElementById(id);
       if (!el) return;
@@ -155,15 +177,22 @@ async function measureQrRect(page) {
 }
 
 // Update only the per-guest fields on an already-loaded page.
-async function renderGuest(page, name, qrDataUri, place) {
+// `hideQr` (VIP guests) hides the whole QR corner so the card has no code.
+async function renderGuest(page, name, qrDataUri, place, hideQr) {
   await page.evaluate(async (d) => {
     const g = document.getElementById("gname");
     if (g) g.textContent = d.name;
+    const corner = document.querySelector(".qr-corner");
     const q = document.getElementById("qrimg");
-    if (q) {
-      q.src = d.qr;
-      // Cap decode so a stuck image can't hang the whole render.
-      try { await Promise.race([q.decode(), new Promise((r) => setTimeout(r, 2000))]); } catch { /* ignore */ }
+    if (d.hideQr) {
+      if (corner) corner.style.display = "none";
+    } else {
+      if (corner) corner.style.display = "";
+      if (q) {
+        q.src = d.qr;
+        // Cap decode so a stuck image can't hang the whole render.
+        try { await Promise.race([q.decode(), new Promise((r) => setTimeout(r, 2000))]); } catch { /* ignore */ }
+      }
     }
     const el = document.getElementById("placeline");
     if (el) {
@@ -174,7 +203,7 @@ async function renderGuest(page, name, qrDataUri, place) {
         el.append(k, v);
       }
     }
-  }, { name, qr: qrDataUri, place });
+  }, { name, qr: qrDataUri, place, hideQr: !!hideQr });
 }
 
 function addLink(pdf, page, url, rect, pageHeight) {
@@ -240,19 +269,21 @@ async function renderAll(guests, buildQrUrl, event = {}, onProgress) {
           const i = next++;
           if (i >= guests.length) break;
           const g = guests[i];
-          const url = buildQrUrl(g);
+          // VIP cards get no QR code and no clickable link.
+          const isVip = !!g.isVip;
+          const url = isVip ? null : buildQrUrl(g);
           const place = g.address || event.venueAddress || "";
           try {
             const png = await withTimeout(
               (async () => {
-                const qr = await qrDataUri(url);
-                await renderGuest(page, g.name, qr, place);
+                const qr = isVip ? null : await qrDataUri(url);
+                await renderGuest(page, g.name, qr, place, isVip);
                 return card.screenshot({ type: "png", optimizeForSpeed: true });
               })(),
               CARD_TIMEOUT_MS,
               `card ${i} (${g.name})`
             );
-            results[i] = { guest: g, url, png, qrRect };
+            results[i] = { guest: g, url, png, qrRect, isVip };
           } catch (err) {
             console.error(`[pdf] skipped card ${i} (${g.name}): ${err.message}`);
             results[i] = null;
@@ -284,24 +315,26 @@ export async function generateBulkPdf(guests, buildQrUrl, event = {}, onProgress
   const pdf = await PDFDocument.create();
   for (const r of rendered) {
     if (!r) continue; // skipped/failed card
-    const { url, png } = r;
+    const { url, png, isVip } = r;
     const img = await pdf.embedPng(png);
     const page = pdf.addPage([img.width, img.height]);
     page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-    // Whole page is clickable → opens the guest's RSVP link.
-    addLink(pdf, page, url, { x: 0, y: 0, width: img.width, height: img.height }, img.height);
+    // Whole page is clickable → opens the guest's RSVP link (skipped for VIP).
+    if (!isVip && url) {
+      addLink(pdf, page, url, { x: 0, y: 0, width: img.width, height: img.height }, img.height);
+    }
   }
   return Buffer.from(await pdf.save());
 }
 
 // Wrap one rendered card PNG into a single-page PDF. The whole page is a
-// clickable link to the guest's RSVP URL (same as the bulk PDF).
-async function pngToPdf(png, qrRect, url) {
+// clickable link to the guest's RSVP URL — unless `url` is null (VIP cards).
+async function pngToPdf(png, url) {
   const pdf = await PDFDocument.create();
   const img = await pdf.embedPng(png);
   const page = pdf.addPage([img.width, img.height]);
   page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-  addLink(pdf, page, url, { x: 0, y: 0, width: img.width, height: img.height }, img.height);
+  if (url) addLink(pdf, page, url, { x: 0, y: 0, width: img.width, height: img.height }, img.height);
   return Buffer.from(await pdf.save());
 }
 
@@ -309,6 +342,8 @@ async function pngToPdf(png, qrRect, url) {
 export async function generatePerGuestPdfs(guests, buildQrUrl, event = {}, onProgress) {
   const rendered = await renderAll(guests, buildQrUrl, event, onProgress);
   return Promise.all(
-    rendered.filter(Boolean).map(async ({ guest, url, png, qrRect }) => ({ guest, pdf: await pngToPdf(png, qrRect, url) }))
+    rendered
+      .filter(Boolean)
+      .map(async ({ guest, url, png, isVip }) => ({ guest, pdf: await pngToPdf(png, isVip ? null : url) }))
   );
 }

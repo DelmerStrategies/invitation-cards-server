@@ -22,13 +22,14 @@ router.get("/", async (req, res) => {
 // PUT /api/event  -> update title/date/venueAddress (admin only)
 router.put("/", adminOnly, async (req, res) => {
   const event = await getActiveEvent();
-  const { title, date, venueAddress, orgText, showLogo } = req.body;
+  const { title, date, venueAddress, orgText, showLogo, bodyText } = req.body;
 
   if (title !== undefined) event.title = title;
   if (date !== undefined) event.date = date;
   if (venueAddress !== undefined) event.venueAddress = venueAddress;
   if (orgText !== undefined) event.orgText = orgText;
   if (showLogo !== undefined) event.showLogo = !!showLogo;
+  if (bodyText !== undefined) event.bodyText = bodyText;
 
   await event.save();
   res.json(event);
