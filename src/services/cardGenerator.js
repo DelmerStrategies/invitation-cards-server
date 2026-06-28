@@ -50,20 +50,39 @@ async function loadHtml() {
   return _html;
 }
 
-const pad = (n) => String(n).padStart(2, "0");
 const ku = (s) => String(s).replace(/[0-9]/g, (n) => "٠١٢٣٤٥٦٧٨٩"[+n]); // Kurdish digits
+
+// The card prints Kurdistan local time (UTC+3, no DST). We resolve the
+// wall-clock in a FIXED timezone so it's correct regardless of the server's own
+// timezone — Azure App Service runs in UTC, so without this the printed time is
+// off by ~3 hours. Override with the CARD_TZ env var if ever needed.
+const CARD_TZ = process.env.CARD_TZ || "Asia/Baghdad";
+function tzParts(value) {
+  const d = new Date(value);
+  if (isNaN(d)) return null;
+  const parts = {};
+  for (const p of new Intl.DateTimeFormat("en-US", {
+    timeZone: CARD_TZ,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(d)) {
+    parts[p.type] = p.value;
+  }
+  return parts;
+}
 function fmtDate(value) {
   if (!value) return "";
-  const d = new Date(value);
-  return isNaN(d) ? "" : ku(`${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`);
+  const p = tzParts(value);
+  return p ? ku(`${p.year}/${p.month}/${p.day}`) : "";
 }
 function fmtTime(value) {
   if (!value) return "";
-  const d = new Date(value);
-  if (isNaN(d)) return "";
-  const period = d.getHours() < 12 ? "پ.ن" : "د.ن";
-  const h12 = d.getHours() % 12 || 12;
-  return `${ku(h12)}:${ku(pad(d.getMinutes()))} ${period}`;
+  const p = tzParts(value);
+  if (!p) return "";
+  const h = parseInt(p.hour, 10) % 24; // some engines emit "24" at midnight
+  const period = h < 12 ? "پ.ن" : "د.ن";
+  const h12 = h % 12 || 12;
+  return `${ku(h12)}:${ku(p.minute)} ${period}`;
 }
 
 // Body text -> an array of paragraphs (one per non-empty line).
