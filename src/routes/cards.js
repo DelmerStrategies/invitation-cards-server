@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { Writable } from "node:stream";
 import Guest from "../models/Guest.js";
 import { getActiveEvent } from "./events.js";
-import { generateCardPng, generateBulkPdf, generatePerGuestPdfs } from "../services/cardGenerator.js";
+import { generateCardPng, generateBulkPdf, streamPerGuestPdfs } from "../services/cardGenerator.js";
 import { rsvpUrl } from "../utils/rsvpUrl.js";
 import { adminOnly } from "../middleware/auth.js";
 
@@ -47,8 +47,10 @@ router.get("/preview/:id", adminOnly, async (req, res) => {
   }
 });
 
-// Build a ZIP (one PDF per guest) into a single Buffer.
-function zipToBuffer(items) {
+// Build a ZIP (one PDF per guest) into a single Buffer, STREAMING: each card is
+// rendered, appended to the archive, then released — so memory stays flat even
+// for big batches on a small (B1) instance.
+function streamZip(event, guests, onProgress) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     const sink = new Writable({ write(c, e, cb) { chunks.push(c); cb(); } });
@@ -56,11 +58,12 @@ function zipToBuffer(items) {
     archive.on("error", reject);
     sink.on("finish", () => resolve(Buffer.concat(chunks)));
     archive.pipe(sink);
-    items.forEach(({ guest, pdf }, i) => {
+    streamPerGuestPdfs(guests, buildQrUrl, event, onProgress, (guest, pdf, i) => {
       const prefix = String(i + 1).padStart(3, "0");
       archive.append(pdf, { name: `${prefix} - ${safeName(guest.name) || "guest"}.pdf` });
-    });
-    archive.finalize();
+    })
+      .then(() => archive.finalize())
+      .catch(reject);
   });
 }
 
@@ -97,9 +100,7 @@ async function startExport(type, vip = false) {
       ? generateBulkPdf(guests, buildQrUrl, event, onProgress).then((buf) => ({
           buffer: buf, filename: `${stem}.pdf`,
         }))
-      : generatePerGuestPdfs(guests, buildQrUrl, event, onProgress)
-          .then((items) => zipToBuffer(items))
-          .then((buf) => ({ buffer: buf, filename: `${stem}.zip` }));
+      : streamZip(event, guests, onProgress).then((buf) => ({ buffer: buf, filename: `${stem}.zip` }));
 
   run
     .then(({ buffer, filename }) => {

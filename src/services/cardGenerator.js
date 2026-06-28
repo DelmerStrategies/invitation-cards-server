@@ -235,95 +235,78 @@ function withTimeout(promise, ms, label) {
 }
 const CARD_TIMEOUT_MS = 30000;
 
-// Render every guest's card PNG using a pool of reused pages (the expensive
-// template parse happens once per page, not once per card). `onProgress(done)`
-// fires after each card. A card that fails/stalls is skipped (result = null)
-// and its worker page is recreated, so the batch always completes.
-async function renderAll(guests, buildQrUrl, event = {}, onProgress) {
-  if (!guests.length) return [];
+// Render guests ONE AT A TIME on a single reused page, calling onCard(card, i)
+// for each. Memory-frugal: only one card's PNG is alive at a time, so big
+// batches don't blow the RAM cap on small instances — the caller consumes each
+// card (e.g. appends it straight to a zip) before the next is rendered.
+// `onProgress(done)` fires after each card; a failed/stalled card is skipped and
+// its page rebuilt, so the batch always finishes.
+async function renderEach(guests, buildQrUrl, event = {}, onCard, onProgress) {
+  if (!guests.length) return;
   const html = await loadHtml();
   const consts = eventConsts(event);
   const browser = await getBrowser();
-  const N = Math.max(1, Math.min(TEMPLATE.concurrency, guests.length));
-
-  const contexts = [];
-  const makePage = async () => {
-    const page = await initPage(browser, html, consts);
-    contexts.push(page.browserContext());
-    return page;
-  };
-
-  const starters = [];
-  for (let i = 0; i < N; i++) starters.push(await makePage());
-  const qrRect = await measureQrRect(starters[0]);
-
-  const results = new Array(guests.length);
-  let next = 0;
+  let page = await initPage(browser, html, consts);
+  let card = await page.$(TEMPLATE.cardSelector);
   let done = 0;
   try {
-    await Promise.all(
-      starters.map(async (startPage) => {
-        let page = startPage;
-        let card = await page.$(TEMPLATE.cardSelector);
-        while (true) {
-          const i = next++;
-          if (i >= guests.length) break;
-          const g = guests[i];
-          // VIP cards get no QR code and no clickable link.
-          const isVip = !!g.isVip;
-          const url = isVip ? null : buildQrUrl(g);
-          const place = g.address || event.venueAddress || "";
-          try {
-            const png = await withTimeout(
-              (async () => {
-                const qr = isVip ? null : await qrDataUri(url);
-                await renderGuest(page, g.name, qr, place, isVip);
-                return card.screenshot({ type: "png", optimizeForSpeed: true });
-              })(),
-              CARD_TIMEOUT_MS,
-              `card ${i} (${g.name})`
-            );
-            results[i] = { guest: g, url, png, qrRect, isVip };
-          } catch (err) {
-            console.error(`[pdf] skipped card ${i} (${g.name}): ${err.message}`);
-            results[i] = null;
-            // The page may be poisoned — replace it for the remaining cards.
-            try { await page.browserContext().close(); } catch { /* ignore */ }
-            page = await makePage();
-            card = await page.$(TEMPLATE.cardSelector);
-          }
-          if (onProgress) onProgress(++done);
-        }
-      })
-    );
+    for (let i = 0; i < guests.length; i++) {
+      const g = guests[i];
+      // VIP cards get no QR code and no clickable link.
+      const isVip = !!g.isVip;
+      const url = isVip ? null : buildQrUrl(g);
+      const place = g.address || event.venueAddress || "";
+      try {
+        const png = await withTimeout(
+          (async () => {
+            const qr = isVip ? null : await qrDataUri(url);
+            await renderGuest(page, g.name, qr, place, isVip);
+            return card.screenshot({ type: "png", optimizeForSpeed: true });
+          })(),
+          CARD_TIMEOUT_MS,
+          `card ${i} (${g.name})`
+        );
+        await onCard({ guest: g, url, png, isVip }, i);
+      } catch (err) {
+        console.error(`[pdf] skipped card ${i} (${g.name}): ${err.message}`);
+        // The page may be poisoned — rebuild it for the remaining cards.
+        try { await page.browserContext().close(); } catch { /* ignore */ }
+        page = await initPage(browser, html, consts);
+        card = await page.$(TEMPLATE.cardSelector);
+      }
+      if (onProgress) onProgress(++done);
+    }
   } finally {
-    await Promise.all(contexts.map((c) => c.close().catch(() => {})));
+    try { await page.browserContext().close(); } catch { /* ignore */ }
   }
-  return results;
 }
 
 /** Generate a single card as a PNG buffer. */
 export async function generateCardPng(guest, qrUrl, event = {}) {
-  const [r] = await renderAll([guest], () => qrUrl, event);
-  if (!r) throw new Error("Card render failed.");
-  return r.png;
+  let out = null;
+  await renderEach([guest], () => qrUrl, event, ({ png }) => { out = png; });
+  if (!out) throw new Error("Card render failed.");
+  return out;
 }
 
 /** Generate one combined PDF with every guest's card, one per page. */
 export async function generateBulkPdf(guests, buildQrUrl, event = {}, onProgress) {
-  const rendered = await renderAll(guests, buildQrUrl, event, onProgress);
   const pdf = await PDFDocument.create();
-  for (const r of rendered) {
-    if (!r) continue; // skipped/failed card
-    const { url, png, isVip } = r;
-    const img = await pdf.embedPng(png);
-    const page = pdf.addPage([img.width, img.height]);
-    page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-    // Whole page is clickable → opens the guest's RSVP link (skipped for VIP).
-    if (!isVip && url) {
-      addLink(pdf, page, url, { x: 0, y: 0, width: img.width, height: img.height }, img.height);
-    }
-  }
+  await renderEach(
+    guests,
+    buildQrUrl,
+    event,
+    async ({ url, png, isVip }) => {
+      const img = await pdf.embedPng(png);
+      const page = pdf.addPage([img.width, img.height]);
+      page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+      // Whole page is clickable → opens the guest's RSVP link (skipped for VIP).
+      if (!isVip && url) {
+        addLink(pdf, page, url, { x: 0, y: 0, width: img.width, height: img.height }, img.height);
+      }
+    },
+    onProgress
+  );
   return Buffer.from(await pdf.save());
 }
 
@@ -338,12 +321,21 @@ async function pngToPdf(png, url) {
   return Buffer.from(await pdf.save());
 }
 
-/** Generate a SEPARATE one-page PDF per guest. Returns [{ guest, pdf }]. */
-export async function generatePerGuestPdfs(guests, buildQrUrl, event = {}, onProgress) {
-  const rendered = await renderAll(guests, buildQrUrl, event, onProgress);
-  return Promise.all(
-    rendered
-      .filter(Boolean)
-      .map(async ({ guest, url, png, isVip }) => ({ guest, pdf: await pngToPdf(png, isVip ? null : url) }))
+/**
+ * Stream a SEPARATE one-page PDF per guest. `onPdf(guest, pdfBuffer, index)` is
+ * called for each card as it's produced (e.g. to append it to a zip), so we
+ * never hold all cards in memory at once.
+ */
+export async function streamPerGuestPdfs(guests, buildQrUrl, event = {}, onProgress, onPdf) {
+  let n = 0;
+  await renderEach(
+    guests,
+    buildQrUrl,
+    event,
+    async ({ guest, url, png, isVip }) => {
+      const pdf = await pngToPdf(png, isVip ? null : url);
+      await onPdf(guest, pdf, n++);
+    },
+    onProgress
   );
 }
