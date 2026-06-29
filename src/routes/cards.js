@@ -50,7 +50,7 @@ router.get("/preview/:id", adminOnly, async (req, res) => {
 // Build a ZIP (one PDF per guest) into a single Buffer, STREAMING: each card is
 // rendered, appended to the archive, then released — so memory stays flat even
 // for big batches on a small (B1) instance.
-function streamZip(event, guests, onProgress, size) {
+function streamZip(event, guests, onProgress, size, transparent) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     const sink = new Writable({ write(c, e, cb) { chunks.push(c); cb(); } });
@@ -61,7 +61,7 @@ function streamZip(event, guests, onProgress, size) {
     streamPerGuestPdfs(guests, buildQrUrl, event, onProgress, (guest, pdf, i) => {
       const prefix = String(i + 1).padStart(3, "0");
       archive.append(pdf, { name: `${prefix} - ${safeName(guest.name) || "guest"}.pdf` });
-    }, size)
+    }, size, transparent)
       .then(() => archive.finalize())
       .catch(reject);
   });
@@ -80,13 +80,13 @@ setInterval(() => {
   for (const [id, j] of jobs) if (now - j.createdAt > JOB_TTL) jobs.delete(id);
 }, 60 * 1000).unref();
 
-async function startExport(type, vip = false, size = "a4") {
+async function startExport(type, vip = false, size = "a4", transparent = false) {
   const event = await getActiveEvent();
   const filter = { event: event._id, isVip: vip ? true : { $ne: true } };
   const guests = await Guest.find(filter).sort({ createdAt: 1 });
   if (!guests.length) return { error: "هیچ میوانێک نییە بۆ دروستکردن." };
 
-  const stem = `${vip ? "vip-cards" : "invitation-cards"}-${size}`;
+  const stem = `${vip ? "vip-cards" : "invitation-cards"}-${size}${transparent ? "-print" : ""}`;
   const id = randomUUID();
   const job = {
     id, type, status: "running", total: guests.length, done: 0,
@@ -97,10 +97,10 @@ async function startExport(type, vip = false, size = "a4") {
   const onProgress = (done) => { job.done = done; };
   const run =
     type === "pdf"
-      ? generateBulkPdf(guests, buildQrUrl, event, onProgress, size).then((buf) => ({
+      ? generateBulkPdf(guests, buildQrUrl, event, onProgress, size, transparent).then((buf) => ({
           buffer: buf, filename: `${stem}.pdf`,
         }))
-      : streamZip(event, guests, onProgress, size).then((buf) => ({ buffer: buf, filename: `${stem}.zip` }));
+      : streamZip(event, guests, onProgress, size, transparent).then((buf) => ({ buffer: buf, filename: `${stem}.zip` }));
 
   run
     .then(({ buffer, filename }) => {
@@ -121,12 +121,12 @@ async function startExport(type, vip = false, size = "a4") {
 // POST /api/cards/pdf/start  | /api/cards/zip/start  -> { jobId, total }
 const normSize = (s) => (s === "a5" ? "a5" : "a4");
 router.post("/pdf/start", adminOnly, async (req, res) => {
-  const r = await startExport("pdf", req.query.vip === "true", normSize(req.query.size));
+  const r = await startExport("pdf", req.query.vip === "true", normSize(req.query.size), req.query.transparent === "true");
   if (r.error) return res.status(400).json(r);
   res.json(r);
 });
 router.post("/zip/start", adminOnly, async (req, res) => {
-  const r = await startExport("zip", req.query.vip === "true", normSize(req.query.size));
+  const r = await startExport("zip", req.query.vip === "true", normSize(req.query.size), req.query.transparent === "true");
   if (r.error) return res.status(400).json(r);
   res.json(r);
 });

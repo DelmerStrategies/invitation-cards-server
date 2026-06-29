@@ -167,12 +167,18 @@ export async function closeBrowser() {
 // Create a page in its OWN browser context, load the template once, and set the
 // per-event constants. Separate contexts let screenshots run concurrently
 // without the headless single-browser screenshot deadlock.
-async function initPage(browser, html, consts, size = "a4") {
+async function initPage(browser, html, consts, size = "a4", transparent = false) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   await page.setViewport({ width: 1000, height: 720, deviceScaleFactor: TEMPLATE.scale });
   await page.setContent(html, { waitUntil: "load", timeout: 20000 });
   if (size === "a5") await page.addStyleTag({ content: A5_CSS });
+  // Print mode: drop the cream fill — on the card AND on html/body (the body
+  // shows through an element screenshot) — so the export is transparent and
+  // prints on the user's own cardstock with only ink, no background.
+  if (transparent) {
+    await page.addStyleTag({ content: "html,body{background:transparent !important;}.card{background:transparent !important;}" });
+  }
   await page.evaluate(async (ev) => {
     if (document.fonts?.ready) await document.fonts.ready;
     // Org text shows only in the bottom footer now (top header kept logos only).
@@ -298,12 +304,12 @@ const CARD_TIMEOUT_MS = 30000;
 // card (e.g. appends it straight to a zip) before the next is rendered.
 // `onProgress(done)` fires after each card; a failed/stalled card is skipped and
 // its page rebuilt, so the batch always finishes.
-async function renderEach(guests, buildQrUrl, event = {}, onCard, onProgress, size = "a4") {
+async function renderEach(guests, buildQrUrl, event = {}, onCard, onProgress, size = "a4", transparent = false) {
   if (!guests.length) return;
   const html = await loadHtml();
   const consts = eventConsts(event);
   const browser = await getBrowser();
-  let page = await initPage(browser, html, consts, size);
+  let page = await initPage(browser, html, consts, size, transparent);
   let card = await page.$(TEMPLATE.cardSelector);
   let done = 0;
   try {
@@ -318,7 +324,7 @@ async function renderEach(guests, buildQrUrl, event = {}, onCard, onProgress, si
           (async () => {
             const qr = isVip ? null : await qrDataUri(url);
             await renderGuest(page, g.name, qr, place, isVip);
-            return card.screenshot({ type: "png", optimizeForSpeed: true });
+            return card.screenshot({ type: "png", optimizeForSpeed: true, omitBackground: transparent });
           })(),
           CARD_TIMEOUT_MS,
           `card ${i} (${g.name})`
@@ -328,7 +334,7 @@ async function renderEach(guests, buildQrUrl, event = {}, onCard, onProgress, si
         console.error(`[pdf] skipped card ${i} (${g.name}): ${err.message}`);
         // The page may be poisoned — rebuild it for the remaining cards.
         try { await page.browserContext().close(); } catch { /* ignore */ }
-        page = await initPage(browser, html, consts, size);
+        page = await initPage(browser, html, consts, size, transparent);
         card = await page.$(TEMPLATE.cardSelector);
       }
       if (onProgress) onProgress(++done);
@@ -339,15 +345,15 @@ async function renderEach(guests, buildQrUrl, event = {}, onCard, onProgress, si
 }
 
 /** Generate a single card as a PNG buffer. */
-export async function generateCardPng(guest, qrUrl, event = {}, size = "a4") {
+export async function generateCardPng(guest, qrUrl, event = {}, size = "a4", transparent = false) {
   let out = null;
-  await renderEach([guest], () => qrUrl, event, ({ png }) => { out = png; }, undefined, size);
+  await renderEach([guest], () => qrUrl, event, ({ png }) => { out = png; }, undefined, size, transparent);
   if (!out) throw new Error("Card render failed.");
   return out;
 }
 
 /** Generate one combined PDF with every guest's card, one per page (A4 or A5). */
-export async function generateBulkPdf(guests, buildQrUrl, event = {}, onProgress, size = "a4") {
+export async function generateBulkPdf(guests, buildQrUrl, event = {}, onProgress, size = "a4", transparent = false) {
   const [pw, ph] = pageDims(size);
   const pdf = await PDFDocument.create();
   await renderEach(
@@ -362,7 +368,8 @@ export async function generateBulkPdf(guests, buildQrUrl, event = {}, onProgress
       if (!isVip && url) addLink(pdf, page, url, rect, ph);
     },
     onProgress,
-    size
+    size,
+    transparent
   );
   return Buffer.from(await pdf.save());
 }
@@ -384,7 +391,7 @@ async function pngToPdf(png, url, size = "a4") {
  * called for each card as it's produced (e.g. to append it to a zip), so we
  * never hold all cards in memory at once.
  */
-export async function streamPerGuestPdfs(guests, buildQrUrl, event = {}, onProgress, onPdf, size = "a4") {
+export async function streamPerGuestPdfs(guests, buildQrUrl, event = {}, onProgress, onPdf, size = "a4", transparent = false) {
   let n = 0;
   await renderEach(
     guests,
@@ -395,6 +402,7 @@ export async function streamPerGuestPdfs(guests, buildQrUrl, event = {}, onProgr
       await onPdf(guest, pdf, n++);
     },
     onProgress,
-    size
+    size,
+    transparent
   );
 }
