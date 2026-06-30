@@ -85,11 +85,12 @@ router.post("/", adminOnly, async (req, res) => {
 
 // PUT /api/guests/:id  -> edit a guest's details (admin only)
 router.put("/:id", adminOnly, async (req, res) => {
-  const { name, address, seatNumber } = req.body;
+  const { name, address, seatNumber, canInvite } = req.body;
   const update = {};
   if (name !== undefined) update.name = name;
   if (address !== undefined) update.address = address;
   if (seatNumber !== undefined) update.seatNumber = seatNumber;
+  if (canInvite !== undefined) update.canInvite = !!canInvite;
 
   const guest = await Guest.findByIdAndUpdate(req.params.id, update, { new: true });
   if (!guest) return res.status(404).json({ error: "Guest not found." });

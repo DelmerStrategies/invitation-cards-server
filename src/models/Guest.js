@@ -13,6 +13,10 @@ const guestSchema = new mongoose.Schema(
     // clickable RSVP link. (Absent/false = a normal guest.)
     isVip: { type: Boolean, default: false, index: true },
 
+    // When true, this guest may bring extra people (the RSVP page shows the
+    // count + names inputs). Default false = confirm for themselves only.
+    canInvite: { type: Boolean, default: false },
+
     // Unique, hard-to-guess token used in the QR link: /r/<token>
     token: { type: String, required: true, unique: true, index: true },
 

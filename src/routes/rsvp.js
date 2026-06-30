@@ -16,6 +16,7 @@ router.get("/:token", async (req, res) => {
     eventDate: event?.date || null,
     address: guest.resolvedAddress(event),
     seatNumber: guest.seatNumber,
+    canInvite: !!guest.canInvite,
     rsvp: guest.rsvp,
   });
 });
@@ -31,9 +32,11 @@ router.post("/:token", async (req, res) => {
     return res.status(400).json({ error: "تکایە وەڵامێکی دروست هەڵبژێرە." });
   }
 
-  const MAX_GUESTS = 50;
+  // Extra people are only honored when THIS guest is allowed to invite
+  // (guest.canInvite). Otherwise forced to empty — can't be bypassed via API.
   guest.rsvp.status = status;
-  if (status === "attending") {
+  if (status === "attending" && guest.canInvite) {
+    const MAX_GUESTS = 50;
     const count = Math.min(MAX_GUESTS, Math.max(0, Math.floor(Number(guestCount) || 0)));
     guest.rsvp.guestCount = count;
     guest.rsvp.guestNames = Array.isArray(guestNames)
