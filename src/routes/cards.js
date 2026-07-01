@@ -47,6 +47,24 @@ router.get("/preview/:id", adminOnly, async (req, res) => {
   }
 });
 
+// GET /api/cards/single/:id  -> ONE guest's card as a PDF (respects size +
+// transparent). Fast, direct download — auth via header OR ?token=.
+router.get("/single/:id", adminOnly, async (req, res) => {
+  const event = await getActiveEvent();
+  const guest = await Guest.findById(req.params.id);
+  if (!guest) return res.status(404).json({ error: "Guest not found." });
+  const size = req.query.size === "a5" ? "a5" : "a4";
+  const transparent = req.query.transparent === "true";
+  try {
+    const buf = await generateBulkPdf([guest], buildQrUrl, event, null, size, transparent);
+    res.set("Content-Type", "application/octet-stream");
+    res.set("Content-Disposition", `attachment; filename="${safeName(guest.name) || "card"}.pdf"`);
+    res.send(buf);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // Build a ZIP (one PDF per guest) into a single Buffer, STREAMING: each card is
 // rendered, appended to the archive, then released — so memory stays flat even
 // for big batches on a small (B1) instance.

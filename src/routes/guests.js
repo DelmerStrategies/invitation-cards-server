@@ -5,6 +5,7 @@ import Guest from "../models/Guest.js";
 import { getActiveEvent } from "./events.js";
 import { makeToken } from "../utils/token.js";
 import { rsvpUrl } from "../utils/rsvpUrl.js";
+import { buildXlsxBuffer } from "../utils/xlsx.js";
 import { adminOnly } from "../middleware/auth.js";
 
 const router = Router();
@@ -27,6 +28,12 @@ router.get("/", async (req, res) => {
   const vipMatch = vip ? true : { $ne: true };
 
   const filter = { event: event._id, isVip: vipMatch };
+  // Status filter: coming / not coming / pending.
+  if (["attending", "declined", "pending"].includes(req.query.status)) {
+    filter["rsvp.status"] = req.query.status;
+  }
+  // "Has guest" filter: guests who brought extra people.
+  if (req.query.hasGuest === "true") filter["rsvp.guestCount"] = { $gt: 0 };
   if (q) {
     const rx = new RegExp(escapeRegex(q), "i");
     filter.$or = [{ name: rx }, { seatNumber: rx }, { address: rx }];
@@ -64,6 +71,43 @@ router.get("/", async (req, res) => {
     pages: Math.max(1, Math.ceil(total / limit)),
     stats,
   });
+});
+
+// GET /api/guests/export  -> Excel of the guest table, honoring the same
+// filters as GET / (vip, status, hasGuest, q). Includes invited names +
+// a has-guest column. Auth via header OR ?token= (it's a navigation download).
+const STATUS_LABEL = { attending: "ئامادە دەبێت", declined: "ناتوانێت", pending: "چاوەڕوان" };
+router.get("/export", adminOnly, async (req, res) => {
+  const event = await getActiveEvent();
+  const vip = req.query.vip === "true";
+  const filter = { event: event._id, isVip: vip ? true : { $ne: true } };
+  if (["attending", "declined", "pending"].includes(req.query.status)) filter["rsvp.status"] = req.query.status;
+  if (req.query.hasGuest === "true") filter["rsvp.guestCount"] = { $gt: 0 };
+  const q = (req.query.q || "").trim();
+  if (q) {
+    const rx = new RegExp(escapeRegex(q), "i");
+    filter.$or = [{ name: rx }, { seatNumber: rx }, { address: rx }];
+  }
+
+  const docs = await Guest.find(filter).sort({ createdAt: 1 }).lean();
+  const rows = [["ناو", "شوێن", "دۆخ", "خاوەن میوان", "ژمارەی میوان", "ناوی میوانەکان"]];
+  for (const g of docs) {
+    const names = Array.isArray(g.rsvp?.guestNames) ? g.rsvp.guestNames.filter(Boolean) : [];
+    const count = g.rsvp?.guestCount || 0;
+    rows.push([
+      g.name || "",
+      g.seatNumber || g.address || "",
+      STATUS_LABEL[g.rsvp?.status] || "",
+      count > 0 ? "بەڵێ" : "",
+      count ? String(count) : "",
+      names.join("، "),
+    ]);
+  }
+
+  const buf = await buildXlsxBuffer(rows, { sheetName: "Guests", widths: [26, 18, 14, 12, 12, 40], rtl: true });
+  res.set("Content-Type", "application/octet-stream");
+  res.set("Content-Disposition", `attachment; filename="${vip ? "vip-guests" : "guests"}.xlsx"`);
+  res.send(buf);
 });
 
 // POST /api/guests  -> add one guest manually (admin only)
