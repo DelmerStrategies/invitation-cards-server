@@ -89,22 +89,27 @@ router.get("/export", adminOnly, async (req, res) => {
     filter.$or = [{ name: rx }, { seatNumber: rx }, { address: rx }];
   }
 
-  const docs = await Guest.find(filter).sort({ createdAt: 1 }).lean();
-  const rows = [["ناو", "شوێن", "دۆخ", "خاوەن میوان", "ژمارەی میوان", "ناوی میوانەکان"]];
+  const docs = await Guest.find(filter).sort({ name: 1 }).lean();
+  // Expanded: one row per person — each main guest, then a row per invited person.
+  const rows = [["#", "ناو", "جۆر", "میوانی سەرەکی", "شوێن", "دۆخ"]];
+  let n = 0;
   for (const g of docs) {
+    const host = g.name || "";
+    const seat = g.seatNumber || g.address || "";
+    const st = STATUS_LABEL[g.rsvp?.status] || "";
+    n++;
+    rows.push([String(n), host, "میوانی سەرەکی", host, seat, st]);
     const names = Array.isArray(g.rsvp?.guestNames) ? g.rsvp.guestNames.filter(Boolean) : [];
     const count = g.rsvp?.guestCount || 0;
-    rows.push([
-      g.name || "",
-      g.seatNumber || g.address || "",
-      STATUS_LABEL[g.rsvp?.status] || "",
-      count > 0 ? "بەڵێ" : "",
-      count ? String(count) : "",
-      names.join("، "),
-    ]);
+    const list = names.slice();
+    for (let i = list.length; i < count; i++) list.push("(ناو نەنووسراوە)");
+    for (const invited of list) {
+      n++;
+      rows.push([String(n), invited, "کەسی بانگهێشتکراو", host, "", ""]);
+    }
   }
 
-  const buf = await buildXlsxBuffer(rows, { sheetName: "Guests", widths: [26, 18, 14, 12, 12, 40], rtl: true });
+  const buf = await buildXlsxBuffer(rows, { sheetName: "Guests", widths: [6, 30, 18, 30, 16, 16], rtl: true });
   res.set("Content-Type", "application/octet-stream");
   res.set("Content-Disposition", `attachment; filename="${vip ? "vip-guests" : "guests"}.xlsx"`);
   res.send(buf);
